@@ -1,0 +1,1170 @@
+1.py](https://github.com/user-attachments/files/24986335/1.py)
+import requests
+import re
+import time
+import sys
+from datetime import datetime  # Добавлен импорт
+
+# === КОНФИГ ===
+START_ID = 48075804
+START_DATE = "13.06.2017"  # Формат DD.MM.YYYY
+TARGET_DATE = "08.02.2017"  # Ищем эту дату
+
+# Настройки поиска
+JUMP_MULTIPLIER = 20000    # Начальный множитель прыжка
+MAX_ATTEMPTS = 300          # Максимум попыток
+PAUSE_SECONDS = 1        # Пауза между запросами
+
+# Корректировка шага (дней → ID)
+CORRECTION_STEPS = {
+    50: 700000,   # Разница >100 дней → шаг 10000 ID
+    30: 500000,     # Разница >30 дней → шаг 5000 ID
+    7: 25000,      # Разница >7 дней → шаг 1000 ID
+    0: 10000        # Меньшая разница → шаг 500 ID
+}
+# === КОНЕЦ КОНФИГА ===
+
+def date_to_days(date_str):
+    """Конвертирует DD.MM.YYYY в дни (обрабатывает разные форматы)"""
+    if not date_str:
+        return None
+    
+    # Очищаем строку
+    date_str = str(date_str).strip().replace('/', '.').replace('-', '.')
+    
+    # Пробуем разные форматы
+    formats = [
+        "%d.%m.%Y",  # 17.06.2010
+        "%d.%m.%y",  # 17.06.10
+        "%Y.%m.%d",  # 2010.06.17 (обратный)
+        "%d-%m-%Y",  # 17-06-2010
+    ]
+    
+    for fmt in formats:
+        try:
+            date_obj = datetime.strptime(date_str, fmt)
+            return date_obj.toordinal()
+        except ValueError:
+            continue
+    
+    print(f"ERROR: Не могу распарсить дату '{date_str}'")
+    return None
+
+def get_date_from_page(user_id, session):
+    """Получает дату регистрации со страницы"""
+    url = f"https://www.kleinanzeigen.de/s-bestandsliste.html?userId={user_id}"
+    try:
+        time.sleep(PAUSE_SECONDS)
+        response = session.get(url, timeout=10)
+        if response.status_code == 404:
+            return None
+        
+        # Ищем дату
+        match = re.search(r'Aktiv seit\s*(\d{1,2}[./]\d{1,2}[./]\d{2,4})', response.text)
+        if match:
+            date_str = match.group(1).replace('/', '.')
+            # Пробуем распарсить для проверки
+            try:
+                datetime.strptime(date_str, "%d.%m.%Y")
+                return date_str
+            except:
+                try:
+                    datetime.strptime(date_str, "%d.%m.%y")
+                    return date_str
+                except:
+                    return None
+        return None
+    except:
+        return None
+
+def calculate_step(days_diff):
+    """Определяет шаг корректировки по таблице"""
+    abs_diff = abs(days_diff)
+    for threshold in sorted(CORRECTION_STEPS.keys(), reverse=True):
+        if abs_diff > threshold:
+            return CORRECTION_STEPS[threshold]
+    return 500
+
+def main():
+    session = requests.Session()
+    session.headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
+    
+    print(f"=== ПОИСК ПОЛЬЗОВАТЕЛЯ ===")
+    print(f"Ищем дату: {TARGET_DATE}")
+    print(f"Старт: ID {START_ID} от {START_DATE}")
+    print(f"Настройки: множитель={JUMP_MULTIPLIER}, пауза={PAUSE_SECONDS}с")
+    print(f"Корректировки: {CORRECTION_STEPS}")
+    print("=" * 40)
+    
+    # Проверяем стартового пользователя
+    print(f"[1] ID {START_ID} -> ", end='')
+    start_date_found = get_date_from_page(START_ID, session)
+    if not start_date_found:
+        print("ОШИБКА: Не видим дату стартового пользователя!")
+        sys.exit(1)
+    print(f"{start_date_found}")
+    
+    # ПРЕДУПРЕЖДЕНИЕ: если дата не совпадает
+    if start_date_found != START_DATE:
+        print(f"ВНИМАНИЕ: Указали {START_DATE}, а на сайте {start_date_found}")
+        print("Продолжаем поиск с датой с сайта...")
+        # Используем найденную дату для расчетов
+        actual_start_date = start_date_found
+    else:
+        actual_start_date = START_DATE
+    
+    # Расчет начального прыжка
+    start_days = date_to_days(actual_start_date)
+    target_days = date_to_days(TARGET_DATE)
+    
+    if not start_days or not target_days:
+        print(f"Ошибка формата даты! start_days={start_days}, target_days={target_days}")
+        sys.exit(1)
+    
+    days_diff = start_days - target_days  # Разница в днях
+    initial_jump = days_diff * JUMP_MULTIPLIER
+    current_id = START_ID - initial_jump  # ID после прыжка
+    
+    print(f"Разница: {days_diff} дней")
+    print(f"Прыжок: {initial_jump} ID -> проверяем ID {current_id}")
+    print("-" * 40)
+    
+    # Основной цикл поиска
+    for attempt in range(2, MAX_ATTEMPTS + 1):
+        if current_id <= 0:
+            print("ID стал отрицательным!")
+            current_id = 1
+            continue
+            
+        print(f"[{attempt}] ID {current_id} -> ", end='', flush=True)
+        
+        date_found = get_date_from_page(current_id, session)
+        
+        if date_found is None:
+            print("Нет пользователя")
+            # Плавное движение вперед/назад
+            current_id += 1 if days_diff > 0 else -1
+            continue
+        
+        print(f"{date_found}")
+        
+        # Проверяем совпадение
+        current_days = date_to_days(date_found)
+        if not current_days:
+            current_id += 100
+            continue
+            
+        if current_days == target_days:
+            print("\n" + "=" * 40)
+            print(f"НАЙДЕНО! ID: {current_id}")
+            print(f"Дата: {date_found}")
+            print(f"Ссылка: https://www.kleinanzeigen.de/s-bestandsliste.html?userId={current_id}")
+            print("=" * 40)
+            return
+        
+        # Корректировка направления
+        if current_days > target_days:  # Мы в будущем относительно цели
+            direction = -1
+            diff = current_days - target_days
+        else:  # Мы в прошлом относительно цели
+            direction = 1
+            diff = target_days - current_days
+        
+        step = calculate_step(diff) * direction
+        print(f"    Корректировка: {step} ID (разница {diff} дней)")
+        current_id += step
+    
+    print(f"\nНе найдено за {MAX_ATTEMPTS} попыток")
+    print(f"Последний ID: {current_id}")
+
+if __name__ == "__main__":
+    main()
+
+
+
+[2v2.py](https://github.com/user-attachments/files/24986336/2v2.py)
+#!/usr/bin/env python3
+# ============================================================
+# Kleinanzeigen — быстрый и стабильный поиск FIRST / LAST ID
+# ============================================================
+
+# =========================
+# ========== КОНФИГ =======
+# =========================
+
+TARGET_DATE = "08.02.2017"        # DD.MM.YYYY
+SEED_ID     = 45210854      # любой ID рядом (НЕ обязательно этой даты)
+
+BASE_URL = "https://www.kleinanzeigen.de/s-bestandsliste.html?userId="
+
+MAX_REQUESTS   = 350
+REQUEST_DELAY  = 1           # можно снижать, но риск бана
+REQUEST_TIMEOUT = 15
+
+USERS_PER_DAY  = 25000            # оценка, НЕ точное значение
+MIN_JUMP       = 20000            # минимум прыжка
+MAX_JUMP       = 1_200_000         # защита от слишком дальних прыжков
+
+MAX_NEIGHBOR_PROBES = 14           # 1,2,4,8,...
+FINAL_SCAN_LIMIT    = 200          # доводка границ
+
+PRINT_DETAILS  = True
+PRINT_REQUESTS = False
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+]
+
+# =========================
+# ========== КОД ===========
+# =========================
+
+import time, random, re
+from datetime import datetime
+from typing import Optional, Tuple, Dict
+import requests
+
+
+AKTIV_RE = re.compile(r"Aktiv\s*seit\s*(\d{1,2}[./]\d{1,2}[./]\d{2,4})", re.IGNORECASE)
+
+def norm_date(s: str) -> Optional[str]:
+    s = s.replace("/", ".")
+    for f in ("%d.%m.%Y", "%d.%m.%y"):
+        try:
+            return datetime.strptime(s, f).strftime("%d.%m.%Y")
+        except ValueError:
+            pass
+    return None
+
+def ord_date(s: str) -> int:
+    return datetime.strptime(s, "%d.%m.%Y").toordinal()
+
+
+class Finder:
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept-Language": "de-DE,de;q=0.9",
+            "DNT": "1",
+        })
+        self.req = 0
+        self.cache: Dict[int, Optional[str]] = {}
+
+    def log(self, msg: str):
+        if PRINT_DETAILS:
+            print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+    def budget_ok(self) -> bool:
+        return self.req < MAX_REQUESTS
+
+    def fetch_date(self, uid: int) -> Optional[str]:
+        if uid < 1 or not self.budget_ok():
+            return None
+        if uid in self.cache:
+            return self.cache[uid]
+
+        time.sleep(REQUEST_DELAY)
+        try:
+            r = self.session.get(f"{BASE_URL}{uid}", timeout=REQUEST_TIMEOUT)
+            self.req += 1
+            if PRINT_REQUESTS:
+                self.log(f"REQ {self.req}/{MAX_REQUESTS}: {uid} -> {r.status_code}")
+
+            if r.status_code != 200:
+                self.cache[uid] = None
+                return None
+
+            m = AKTIV_RE.search(r.text)
+            if not m:
+                self.cache[uid] = None
+                return None
+
+            d = norm_date(m.group(1))
+            self.cache[uid] = d
+            return d
+        except Exception:
+            self.req += 1
+            return None
+
+    def nearest_ok(self, uid: int, lo: int, hi: int) -> Tuple[Optional[int], Optional[str]]:
+        d = self.fetch_date(uid)
+        if d and lo <= uid <= hi:
+            return uid, d
+
+        step = 1
+        for _ in range(MAX_NEIGHBOR_PROBES):
+            for c in (uid-step, uid+step):
+                if c < lo or c > hi:
+                    continue
+                dd = self.fetch_date(c)
+                if dd:
+                    return c, dd
+            step *= 2
+        return None, None
+
+    def jump(self, uid: int, days: int, direction: int) -> int:
+        step = max(MIN_JUMP, min(days * USERS_PER_DAY, MAX_JUMP))
+        return uid + direction * step
+
+    # ---------- 1) найти known_id ----------
+    def find_known_id(self) -> Optional[int]:
+        tord = ord_date(TARGET_DATE)
+
+        d = self.fetch_date(SEED_ID)
+        if d and ord_date(d) == tord:
+            self.log(f"✅ known_id: {SEED_ID} = {d}")
+            return SEED_ID
+
+        for days in (1, 2, 4, 8, 16, 32, 64, 128):
+            for dir_ in (-1, +1):
+                cand = self.jump(SEED_ID, days, dir_)
+                dd = self.fetch_date(cand)
+                if dd and ord_date(dd) == tord:
+                    self.log(f"✅ known_id: {cand} = {dd}")
+                    return cand
+
+        self.log("❌ Не найден known_id — возьми SEED_ID ближе к дате")
+        return None
+
+    # ---------- FIRST ----------
+    def find_first(self, known: int) -> Optional[int]:
+        tord = ord_date(TARGET_DATE)
+        hi = known
+
+        # ищем lo < target
+        days = 1
+        while self.budget_ok():
+            cand = self.jump(hi, days, -1)
+            cid, cd = self.nearest_ok(cand, 1, hi-1)
+            if cid and ord_date(cd) < tord:
+                lo = cid
+                break
+            days *= 2
+
+        # бинарка
+        left, right = lo, hi
+        while left < right - 1 and self.budget_ok():
+            mid = (left + right) // 2
+            mid_id, mid_d = self.nearest_ok(mid, left+1, right-1)
+
+            if not mid_id:
+                right -= 1
+                continue
+
+            if ord_date(mid_d) < tord:
+                left = mid_id
+            else:
+                right = mid_id
+
+            self.log(f"FIRST step: {left} .. {right}")
+
+        # доводка
+        cur = right
+        for _ in range(FINAL_SCAN_LIMIT):
+            pid, pd = self.nearest_ok(cur-1, 1, cur-1)
+            if not pid or ord_date(pd) < tord:
+                return cur
+            cur = pid
+
+        return cur
+
+    # ---------- LAST ----------
+    def find_last(self, first: int) -> Optional[int]:
+        tord = ord_date(TARGET_DATE)
+        lo = first
+
+        days = 1
+        while self.budget_ok():
+            cand = self.jump(lo, days, +1)
+            cid, cd = self.nearest_ok(cand, lo+1, cand + MAX_JUMP)
+            if cid and ord_date(cd) > tord:
+                hi = cid
+                break
+            days *= 2
+
+        # бинарка
+        left, right = lo, hi
+        while left < right - 1 and self.budget_ok():
+            mid = (left + right) // 2
+            mid_id, mid_d = self.nearest_ok(mid, left+1, right-1)
+
+            if not mid_id:
+                left += 1
+                continue
+
+            if ord_date(mid_d) <= tord:
+                left = mid_id
+            else:
+                right = mid_id
+
+            self.log(f"LAST step: {left} .. {right}")
+
+        # доводка
+        cur = left
+        for _ in range(FINAL_SCAN_LIMIT):
+            nid, nd = self.nearest_ok(cur+1, cur+1, cur+1 + MAX_JUMP)
+            if not nid or ord_date(nd) > tord:
+                return cur
+            cur = nid
+
+        return cur
+
+
+def main():
+    print("="*70)
+    print("🚀 Kleinanzeigen — поиск границ регистрации (stable)")
+    print("="*70)
+    print(f"Дата   : {TARGET_DATE}")
+    print(f"Seed ID: {SEED_ID}")
+    print("="*70)
+
+    f = Finder()
+
+    known = f.find_known_id()
+    if not known:
+        print("❌ known_id не найден")
+        return
+
+    first = f.find_first(known)
+    if not first:
+        print("❌ FIRST_ID не найден")
+        return
+
+    last = f.find_last(first)
+    if not last:
+        print("❌ LAST_ID не найден")
+        return
+
+    print("\n" + "="*70)
+    print("✅ РЕЗУЛЬТАТ")
+    print("="*70)
+    print(f"KNOWN_ID : {known}")
+    print(f"FIRST_ID : {first}")
+    print(f"LAST_ID  : {last}")
+    print(f"COUNT    : {last-first+1:,}")
+    print(f"REQUESTS : {f.req}/{MAX_REQUESTS}")
+    print("="*70)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+    [3neu.py](https://github.com/user-attachments/files/24986337/3neu.py)
+"""
+Парсер для поиска КОНКРЕТНОГО пользователя на Kleinanzeigen.de
+Надежная версия с полным контролем пропусков и явным оповещением при находке
+"""
+
+import requests
+import re
+import time
+import json
+import sys
+import logging
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from collections import defaultdict
+import signal
+
+# ================= КОНФИГУРАЦИЯ =================
+START_ID = 17479674
+END_ID = 17502395
+TARGET_NAME = "Manuela"
+TARGET_DATE = ""  # Не проверяем дату
+
+# Оптимальные настройки для надежности
+REQUESTS_PER_SECOND = 15     # Безопасная скорость: 15 запр/сек
+MAX_WORKERS = 6              # Оптимальное количество потоков
+BATCH_SIZE = 50              # Размер пакета
+TIMEOUT = 10                 # Таймаут запроса в секундах
+
+# Настройки логирования
+LOG_FILE = "search_complete.log"
+LOG_LEVEL = logging.INFO
+SAVE_PROGRESS = True
+PROGRESS_FILE = "search_progress.json"
+# ================================================
+
+BASE_URL = "https://www.kleinanzeigen.de/s-bestandsliste.html?userId={user_id}"
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+}
+
+class RateLimiter:
+    """Контролер скорости запросов"""
+    def __init__(self, requests_per_second):
+        self.requests_per_second = requests_per_second
+        self.min_interval = 1.0 / requests_per_second
+        self.last_request_time = 0
+        self.lock = threading.Lock()
+    
+    def wait(self):
+        """Ждет необходимое время перед следующим запросом"""
+        with self.lock:
+            current_time = time.time()
+            elapsed = current_time - self.last_request_time
+            
+            if elapsed < self.min_interval:
+                sleep_time = self.min_interval - elapsed
+                time.sleep(sleep_time)
+            
+            self.last_request_time = time.time()
+
+class SearchLogger:
+    """Кастомный логгер с красивым выводом"""
+    def __init__(self):
+        # Настройка файлового логгера
+        file_handler = logging.FileHandler(LOG_FILE, encoding='utf-8')
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        
+        # Настройка консольного логгера
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter('%(message)s'))
+        
+        self.logger = logging.getLogger('KleinanzeigenSearch')
+        self.logger.setLevel(LOG_LEVEL)
+        self.logger.addHandler(file_handler)
+        self.logger.addHandler(console_handler)
+        
+        # Для цветного вывода в консоль
+        self.colors = {
+            'INFO': '\033[94m',      # Синий
+            'SUCCESS': '\033[92m',   # Зеленый
+            'WARNING': '\033[93m',   # Желтый
+            'ERROR': '\033[91m',     # Красный
+            'DEBUG': '\033[90m',     # Серый
+            'FOUND': '\033[95m',     # Фиолетовый
+            'FOUND_BANNER': '\033[1;35m',  # Жирный фиолетовый
+            'RESET': '\033[0m',      # Сброс
+        }
+    
+    def log(self, level: str, message: str, user_id: int = None, details: dict = None):
+        """Логирование с красивым форматированием"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        
+        # Формируем основное сообщение
+        if user_id:
+            base_msg = f"[{timestamp}] [{level}] ID {user_id}: {message}"
+        else:
+            base_msg = f"[{timestamp}] [{level}]: {message}"
+        
+        # Добавляем детали
+        if details:
+            details_str = " | ".join([f"{k}={v}" for k, v in details.items() if v is not None])
+            if details_str:
+                base_msg += f" | {details_str}"
+        
+        # Логируем в файл (без цветов)
+        if level == 'FOUND':
+            self.logger.warning(base_msg)
+        elif level == 'SUCCESS':
+            self.logger.info(base_msg)
+        else:
+            getattr(self.logger, level.lower())(base_msg)
+        
+        # Красивый вывод в консоль
+        color = self.colors.get(level, self.colors['RESET'])
+        console_msg = f"{color}{base_msg}{self.colors['RESET']}"
+        
+        # Для прогресса и FOUND сообщений - новая строка
+        if level in ['PROGRESS', 'FOUND', 'ERROR']:
+            print(console_msg)
+        else:
+            # Для обычных сообщений - только если они важные
+            if level in ['WARNING', 'SUCCESS'] or 'ERROR' in level:
+                print(console_msg)
+
+class ReliableUserSearch:
+    def __init__(self):
+        self.start_id = START_ID
+        self.end_id = END_ID
+        self.target_name = TARGET_NAME
+        self.target_date = TARGET_DATE
+        self.total_users = END_ID - START_ID + 1
+        
+        # Инициализация
+        self.logger = SearchLogger()
+        self.rate_limiter = RateLimiter(REQUESTS_PER_SECOND)
+        
+        # Статистика и состояние
+        self.found_users = []
+        self.checked_ids = set()
+        self.request_count = 0
+        self.success_count = 0
+        self.error_count = 0
+        self.missing_ids = set()
+        self.start_time = time.time()
+        
+        self.lock = threading.Lock()
+        self.session = requests.Session()
+        self.session.headers.update(HEADERS)
+        
+        # Детальная статистика ошибок
+        self.error_stats = defaultdict(int)
+        self.error_codes = defaultdict(int)
+        
+        # Для контроля остановки
+        self.should_stop = False
+        signal.signal(signal.SIGINT, self.signal_handler)
+        
+        # Загрузка прогресса
+        if SAVE_PROGRESS:
+            self.load_progress()
+        
+        self.show_header()
+        self.print_expected_stats()
+    
+    def signal_handler(self, signum, frame):
+        """Обработчик Ctrl+C"""
+        self.logger.log('WARNING', "Получен сигнал остановки, завершаем...")
+        self.should_stop = True
+    
+    def show_header(self):
+        """Красивый заголовок"""
+        print("\n" + "=" * 80)
+        print("🔍 KLEINANZEIGEN ПОИСК ПОЛЬЗОВАТЕЛЯ - НАДЕЖНАЯ ВЕРСИЯ")
+        print("=" * 80)
+        print(f"🎯 Цель: '{self.target_name}'")
+        print(f"📊 Диапазон: {self.start_id:,} - {self.end_id:,}")
+        print(f"📈 Всего пользователей: {self.total_users:,}")
+        print(f"⚡ Скорость: {REQUESTS_PER_SECOND} запросов/сек")
+        print(f"🧵 Потоков: {MAX_WORKERS}")
+        print("=" * 80)
+        print("📝 Полный лог: search_complete.log")
+        print("💾 Автосохранение: search_progress.json")
+        print("=" * 80 + "\n")
+    
+    def print_expected_stats(self):
+        """Расчет ожидаемой производительности"""
+        total_requests = self.total_users
+        estimated_time = total_requests / REQUESTS_PER_SECOND
+        
+        self.logger.log('INFO', f"РАСЧЕТ ПРОИЗВОДИТЕЛЬНОСТИ:")
+        self.logger.log('INFO', f"  • Всего запросов: {total_requests:,}")
+        self.logger.log('INFO', f"  • Целевая скорость: {REQUESTS_PER_SECOND} запр/сек")
+        
+        if estimated_time < 60:
+            self.logger.log('SUCCESS', f"  • Расчетное время: {estimated_time:.1f} секунд")
+        elif estimated_time < 3600:
+            minutes = estimated_time / 60
+            self.logger.log('SUCCESS', f"  • Расчетное время: {minutes:.1f} минут")
+        else:
+            hours = estimated_time / 3600
+            self.logger.log('SUCCESS', f"  • Расчетное время: {hours:.1f} часов")
+        
+        print()
+    
+    def clean_name(self, name: str) -> str:
+        """Очистка имени от лишних пробелов"""
+        if not name:
+            return ""
+        return re.sub(r'\s+', ' ', name.strip())
+    
+    def extract_name_from_html(self, html: str):
+        """Извлечение имени пользователя из HTML"""
+        try:
+            # Основной паттерн
+            pattern = r'<h2\s+class="userprofile--name">\s*<span\s+class="sr-only">Profil\s+von</span>\s*(.*?)\s*</h2>'
+            match = re.search(pattern, html, re.DOTALL | re.IGNORECASE)
+            
+            if match:
+                name = match.group(1).strip()
+                name = re.sub(r'&[a-z]+;', ' ', name)
+                return self.clean_name(name)
+            
+            # Запасной паттерн
+            pattern2 = r'"userprofile--name"[^>]*>.*?Profil von.*?>\s*(.*?)\s*<'
+            match = re.search(pattern2, html, re.DOTALL | re.IGNORECASE)
+            if match:
+                name = match.group(1).strip()
+                return self.clean_name(name)
+            
+            return None
+        except Exception as e:
+            self.logger.log('DEBUG', f"Ошибка парсинга имени: {str(e)[:50]}")
+            return None
+    
+    def is_exact_match(self, found_name: str) -> bool:
+        """Проверка точного совпадения имени"""
+        if not found_name:
+            return False
+        clean_found = self.clean_name(found_name).lower()
+        clean_target = self.clean_name(self.target_name).lower()
+        return clean_found == clean_target
+    
+    def fetch_user_page(self, user_id: int):
+        """Получение страницы пользователя с контролем скорости"""
+        # Контроль скорости
+        self.rate_limiter.wait()
+        
+        url = BASE_URL.format(user_id=user_id)
+        
+        try:
+            response = self.session.get(url, timeout=TIMEOUT)
+            
+            with self.lock:
+                self.request_count += 1
+                self.success_count += 1
+            
+            return {
+                'success': True,
+                'status_code': response.status_code,
+                'html': response.text if response.status_code == 200 else None,
+                'error': None
+            }
+            
+        except requests.exceptions.Timeout:
+            with self.lock:
+                self.request_count += 1
+                self.error_count += 1
+                self.error_stats['timeout'] += 1
+            
+            return {
+                'success': False,
+                'status_code': None,
+                'html': None,
+                'error': 'timeout'
+            }
+            
+        except requests.exceptions.ConnectionError:
+            with self.lock:
+                self.request_count += 1
+                self.error_count += 1
+                self.error_stats['connection'] += 1
+            
+            return {
+                'success': False,
+                'status_code': None,
+                'html': None,
+                'error': 'connection'
+            }
+            
+        except Exception as e:
+            with self.lock:
+                self.request_count += 1
+                self.error_count += 1
+                self.error_stats['other'] += 1
+            
+            return {
+                'success': False,
+                'status_code': None,
+                'html': None,
+                'error': f'other: {str(e)[:50]}'
+            }
+    
+    def process_user(self, user_id: int):
+        """Обработка одного пользователя"""
+        if self.should_stop:
+            return None
+        
+        # Получаем страницу
+        result = self.fetch_user_page(user_id)
+        
+        # Логируем ВСЕ результаты
+        if result['success']:
+            if result['status_code'] == 200:
+                # Парсим имя
+                name = self.extract_name_from_html(result['html'])
+                
+                if name:
+                    # Проверяем на совпадение
+                    if self.is_exact_match(name):
+                        user_data = {
+                            'id': user_id,
+                            'name': name,
+                            'url': BASE_URL.format(user_id=user_id),
+                            'timestamp': datetime.now().isoformat()
+                        }
+                        
+                        with self.lock:
+                            self.found_users.append(user_data)
+                        
+                        # ===== ЯВНОЕ ОПОВЕЩЕНИЕ О НАХОЖДЕНИИ ЦЕЛЕВОГО ПОЛЬЗОВАТЕЛЯ =====
+                        print("\n" + "⭐" * 70)
+                        print("⭐" * 25 + " НАЙДЕН ЦЕЛЕВОЙ ПОЛЬЗОВАТЕЛЬ! " + "⭐" * 25)
+                        print("⭐" * 70)
+                        print(f"⭐ ID: {user_id}")
+                        print(f"⭐ ИМЯ: {name}")
+                        print(f"⭐ ССЫЛКА: {BASE_URL.format(user_id=user_id)}")
+                        print(f"⭐ ВРЕМЯ: {datetime.now().strftime('%H:%M:%S')}")
+                        print("⭐" * 70)
+                        print("⭐ Скрипт продолжит работу для поиска других совпадений")
+                        print("⭐" * 70 + "\n")
+                        
+                        # Стандартное логирование
+                        self.logger.log('FOUND', f"НАЙДЕН ПОЛЬЗОВАТЕЛЬ!", user_id, 
+                                      {'name': name, 'status': 'FOUND'})
+                        return user_data
+                    
+                    # Обычный пользователь
+                    self.logger.log('INFO', "Проверен", user_id, {'name': name})
+                else:
+                    # Страница есть, но имя не найдено
+                    self.logger.log('DEBUG', "Имя не найдено в HTML", user_id)
+            else:
+                # HTTP ошибка
+                with self.lock:
+                    self.error_codes[result['status_code']] += 1
+                
+                self.logger.log('ERROR', f"HTTP ошибка", user_id, 
+                              {'status': result['status_code']})
+        else:
+            # Ошибка сети/таймаут
+            self.logger.log('ERROR', f"Ошибка запроса", user_id, {'error': result['error']})
+        
+        return None
+    
+    def print_progress(self):
+        """Красивый вывод прогресса"""
+        with self.lock:
+            checked = len(self.checked_ids)
+            requests = self.request_count
+            errors = self.error_count
+            found = len(self.found_users)
+        
+        # Расчеты
+        elapsed = time.time() - self.start_time
+        progress_pct = (checked / self.total_users * 100) if self.total_users > 0 else 0
+        
+        if elapsed > 0:
+            speed = requests / elapsed
+        else:
+            speed = 0
+        
+        # Расчет оставшегося времени
+        if speed > 0 and checked < self.total_users:
+            remaining = self.total_users - checked
+            eta_seconds = remaining / speed
+            
+            if eta_seconds < 60:
+                eta_str = f"{eta_seconds:.0f}с"
+            elif eta_seconds < 3600:
+                eta_str = f"{eta_seconds/60:.0f}м"
+            else:
+                eta_str = f"{eta_seconds/3600:.1f}ч"
+        else:
+            eta_str = "---"
+        
+        # Форматированная строка прогресса
+        progress_line = (
+            f"[{datetime.now().strftime('%H:%M:%S')}] "
+            f"[PROGRESS] Проверено: {checked:,}/{self.total_users:,} ({progress_pct:.1f}%) | "
+            f"Скорость: {speed:.1f} запр/сек | "
+            f"Осталось: {eta_str} | "
+            f"Найдено: {found} | "
+            f"Ошибок: {errors:,}"
+        )
+        
+        # Цвет для прогресса
+        if progress_pct < 30:
+            color = '\033[91m'  # Красный
+        elif progress_pct < 70:
+            color = '\033[93m'  # Желтый
+        else:
+            color = '\033[92m'  # Зеленый
+        
+        print(f"{color}{progress_line}\033[0m", end='\r')
+    
+    def search_batch(self, batch_ids):
+        """Поиск в пакете ID"""
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_id = {executor.submit(self.process_user, user_id): user_id 
+                          for user_id in batch_ids}
+            
+            for future in as_completed(future_to_id):
+                user_id = future_to_id[future]
+                
+                try:
+                    future.result(timeout=TIMEOUT + 5)
+                except Exception as e:
+                    self.logger.log('ERROR', f"Ошибка обработки", user_id, 
+                                  {'error': str(e)[:50]})
+                
+                with self.lock:
+                    self.checked_ids.add(user_id)
+                
+                # Показываем прогресс каждые 5 проверок
+                if len(self.checked_ids) % 5 == 0:
+                    self.print_progress()
+    
+    def run_search(self):
+        """Основной метод поиска"""
+        self.logger.log('INFO', "🚀 ЗАПУСК ПОИСКА...")
+        self.logger.log('INFO', f"Нажмите Ctrl+C для безопасной остановки")
+        print()
+        
+        # Начальный вывод прогресса
+        self.print_progress()
+        
+        # Разбиваем на пакеты
+        all_ids = range(self.start_id, self.end_id + 1)
+        total_batches = (self.total_users + BATCH_SIZE - 1) // BATCH_SIZE
+        
+        for batch_num in range(total_batches):
+            if self.should_stop:
+                self.logger.log('WARNING', "Поиск остановлен пользователем")
+                break
+            
+            start_idx = batch_num * BATCH_SIZE
+            end_idx = min((batch_num + 1) * BATCH_SIZE, self.total_users)
+            batch_ids = list(all_ids[start_idx:end_idx])
+            
+            batch_start = time.time()
+            self.search_batch(batch_ids)
+            batch_time = time.time() - batch_start
+            
+            # Статистика пакета
+            if batch_time > 0 and len(batch_ids) > 0:
+                batch_speed = len(batch_ids) / batch_time
+                self.logger.log('DEBUG', f"Пакет {batch_num+1}/{total_batches} завершен", 
+                              None, {'время': f"{batch_time:.1f}с", 'скорость': f"{batch_speed:.1f} запр/сек"})
+            
+            # Сохраняем прогресс каждые 5 пакетов
+            if SAVE_PROGRESS and batch_num % 5 == 0:
+                self.save_progress()
+            
+            # Небольшая пауза между пакетами
+            if batch_num < total_batches - 1 and not self.should_stop:
+                time.sleep(0.3)
+        
+        # Финальный прогресс
+        self.print_progress()
+        print("\n")
+        
+        # Проверяем пропущенные ID
+        self.check_missing_ids()
+        
+        return self.found_users
+    
+    def check_missing_ids(self):
+        """Проверка пропущенных ID"""
+        expected_ids = set(range(self.start_id, self.end_id + 1))
+        missing_ids = expected_ids - self.checked_ids
+        
+        if missing_ids:
+            self.missing_ids = missing_ids
+            self.logger.log('WARNING', f"Обнаружены пропущенные ID: {len(missing_ids)}")
+            
+            # Логируем первые 10 пропущенных ID
+            first_missing = sorted(missing_ids)[:10]
+            for mid in first_missing:
+                self.logger.log('DEBUG', f"Пропущен ID", mid)
+            
+            if len(missing_ids) > 10:
+                self.logger.log('DEBUG', f"... и еще {len(missing_ids) - 10} ID")
+    
+    def save_progress(self):
+        """Сохранение прогресса"""
+        if not SAVE_PROGRESS:
+            return
+        
+        with self.lock:
+            data = {
+                'search_config': {
+                    'start_id': self.start_id,
+                    'end_id': self.end_id,
+                    'target_name': self.target_name,
+                    'target_date': self.target_date,
+                },
+                'progress': {
+                    'checked_ids': sorted(list(self.checked_ids)),
+                    'last_check_time': datetime.now().isoformat(),
+                    'total_checked': len(self.checked_ids),
+                },
+                'results': {
+                    'found_users': self.found_users,
+                    'total_found': len(self.found_users),
+                },
+                'statistics': {
+                    'requests': self.request_count,
+                    'success': self.success_count,
+                    'errors': self.error_count,
+                    'error_stats': dict(self.error_stats),
+                    'error_codes': dict(self.error_codes),
+                },
+                'missing_ids': sorted(list(self.missing_ids)),
+            }
+        
+        try:
+            with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            self.logger.log('SUCCESS', "Прогресс сохранен")
+        except Exception as e:
+            self.logger.log('ERROR', f"Ошибка сохранения прогресса", None, {'error': str(e)})
+    
+    def load_progress(self):
+        """Загрузка прогресса"""
+        try:
+            with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            config = data.get('search_config', {})
+            if (config.get('start_id') == self.start_id and 
+                config.get('end_id') == self.end_id and
+                config.get('target_name') == self.target_name):
+                
+                progress = data.get('progress', {})
+                self.checked_ids = set(progress.get('checked_ids', []))
+                
+                results = data.get('results', {})
+                self.found_users = results.get('found_users', [])
+                
+                stats = data.get('statistics', {})
+                self.request_count = stats.get('requests', 0)
+                self.success_count = stats.get('success', 0)
+                self.error_count = stats.get('errors', 0)
+                
+                missing = data.get('missing_ids', [])
+                self.missing_ids = set(missing)
+                
+                self.logger.log('SUCCESS', f"Загружен прогресс: {len(self.checked_ids):,} проверенных")
+                self.logger.log('SUCCESS', f"Уже найдено: {len(self.found_users)} пользователей")
+                
+                if self.missing_ids:
+                    self.logger.log('WARNING', f"Есть пропущенные ID: {len(self.missing_ids)}")
+                
+        except FileNotFoundError:
+            self.logger.log('INFO', "Прогресс не найден, начинаем с начала")
+        except Exception as e:
+            self.logger.log('ERROR', f"Ошибка загрузки прогресса", None, {'error': str(e)})
+    
+    def print_final_report(self):
+        """Красивый финальный отчет с выделением найденных пользователей"""
+        print("\n" + "=" * 80)
+        print("📊 ФИНАЛЬНЫЙ ОТЧЕТ ПОИСКА")
+        print("=" * 80)
+        
+        elapsed = time.time() - self.start_time
+        
+        with self.lock:
+            checked = len(self.checked_ids)
+            requests = self.request_count
+            errors = self.error_count
+            found = len(self.found_users)
+            missing = len(self.missing_ids)
+        
+        # Время
+        if elapsed < 60:
+            time_str = f"{elapsed:.1f} секунд"
+        elif elapsed < 3600:
+            time_str = f"{elapsed/60:.1f} минут"
+        else:
+            time_str = f"{elapsed/3600:.1f} часов"
+        
+        print(f"\n⏱️  ОБЩЕЕ ВРЕМЯ: {time_str}")
+        print(f"📊 ПРОВЕРЕНО: {checked:,}/{self.total_users:,} пользователей")
+        
+        if elapsed > 0:
+            avg_speed = requests / elapsed
+            print(f"⚡ СРЕДНЯЯ СКОРОСТЬ: {avg_speed:.1f} запросов/сек")
+        
+        print(f"✅ УСПЕШНЫХ ЗАПРОСОВ: {self.success_count:,}")
+        print(f"❌ ОШИБОК: {errors:,}")
+        
+        # Статистика ошибок
+        if self.error_stats:
+            print(f"\n🔧 СТАТИСТИКА ОШИБОК:")
+            for error_type, count in sorted(self.error_stats.items()):
+                if count > 0:
+                    percentage = (count / errors * 100) if errors > 0 else 0
+                    print(f"   • {error_type}: {count:,} ({percentage:.1f}%)")
+        
+        # HTTP коды ошибок
+        if self.error_codes:
+            print(f"\n📡 HTTP СТАТУСЫ:")
+            for code, count in sorted(self.error_codes.items()):
+                print(f"   • {code}: {count:,}")
+        
+        # Пропущенные ID
+        if missing > 0:
+            print(f"\n⚠️  ПРОПУЩЕНО ID: {missing:,}")
+            if missing <= 20:
+                print(f"   ID: {sorted(self.missing_ids)}")
+        
+        # РЕЗУЛЬТАТЫ С ЯВНЫМ ВЫДЕЛЕНИЕМ
+        print(f"\n" + "-" * 40)
+        print("🎯 РЕЗУЛЬТАТЫ ПОИСКА:")
+        
+        if found > 0:
+            print(f"\n" + "🎯" * 40)
+            print(f"🎯 НАЙДЕНО ЦЕЛЕВЫХ ПОЛЬЗОВАТЕЛЕЙ: {found}")
+            print("🎯" * 40)
+            
+            for user in self.found_users:
+                print(f"\n   ⭐ ID: {user['id']}")
+                print(f"   ⭐ Имя: {user['name']}")
+                print(f"   ⭐ Ссылка: {user['url']}")
+                print(f"   ⭐ Время находки: {user['timestamp'][11:19]}")
+                print(f"   {'─' * 40}")
+        else:
+            print(f"\n❌ Пользователь '{self.target_name}' не найден")
+            print(f"   в диапазоне {self.start_id:,} - {self.end_id:,}")
+        
+        print(f"\n" + "=" * 80)
+        print(f"📁 Лог сохранен: {LOG_FILE}")
+        if SAVE_PROGRESS:
+            print(f"💾 Прогресс сохранен: {PROGRESS_FILE}")
+        print("=" * 80)
+
+def main():
+    """Основная функция"""
+    # Проверка конфигурации
+    if START_ID > END_ID:
+        print("❌ Ошибка: START_ID должен быть меньше END_ID")
+        return
+    
+    if not TARGET_NAME or TARGET_NAME.strip() == "":
+        print("❌ Ошибка: TARGET_NAME не может быть пустым")
+        return
+    
+    print("\n" + "✨" * 40)
+    print("✨      KLEINANZEIGEN ПОИСК ПОЛЬЗОВАТЕЛЯ      ✨")
+    print("✨" * 40 + "\n")
+    
+    try:
+        # Создаем поиск
+        search = ReliableUserSearch()
+        
+        # Запускаем поиск
+        found = search.run_search()
+        
+        # Сохраняем финальный прогресс
+        if SAVE_PROGRESS:
+            search.save_progress()
+        
+        # Выводим отчет
+        search.print_final_report()
+        
+        # Предложение проверить пропущенные ID
+        if search.missing_ids:
+            print(f"\n⚠️  Хотите проверить пропущенные ID?")
+            print(f"   Запустите: python check_missing.py")
+        
+    except KeyboardInterrupt:
+        print("\n\n🛑 ПОИСК ПРЕРВАН ПОЛЬЗОВАТЕЛЕМ")
+        if 'search' in locals():
+            if SAVE_PROGRESS:
+                search.save_progress()
+            search.print_final_report()
+    except Exception as e:
+        print(f"\n💥 КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    main()
